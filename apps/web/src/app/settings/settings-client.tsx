@@ -10,21 +10,54 @@ export function SettingsClient() {
   const { user, profile } = useAuth();
   const [activeTab, setActiveTab] = useState<"profile" | "jira">("profile");
 
+  const [displayName, setDisplayName] = useState("");
+  const [teamId, setTeamId] = useState("");
+  const [role, setRole] = useState<"admin" | "worker">("worker");
+
   const [domain, setDomain] = useState("");
   const [email, setEmail] = useState("");
   const [apiToken, setApiToken] = useState("");
   const [defaultProject, setDefaultProject] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [profileMessage, setProfileMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   useEffect(() => {
     if (profile) {
-      setDomain(profile.jiraDomain || "");
-      setEmail(profile.jiraEmail || "");
-      setApiToken(profile.jiraApiToken || "");
-      setDefaultProject(profile.jiraDefaultProject || "");
+      // Defer updates to avoid cascading renders
+      queueMicrotask(() => {
+        setDisplayName(profile.displayName || "");
+        setTeamId(profile.teamId || "");
+        setRole(profile.role || "worker");
+        setDomain(profile.jiraDomain || "");
+        setEmail(profile.jiraEmail || "");
+        setApiToken(profile.jiraApiToken || "");
+        setDefaultProject(profile.jiraDefaultProject || "");
+      });
     }
   }, [profile]);
+
+  async function handleSaveProfile(e: React.FormEvent) {
+    e.preventDefault();
+    if (!user) return;
+    setSaving(true);
+    setProfileMessage(null);
+
+    try {
+      const userRef = doc(getFirestoreDb(), USERS_COLLECTION, user.uid);
+      await updateDoc(userRef, {
+        displayName: displayName.trim(),
+        teamId: teamId.trim(),
+        role: role,
+      });
+      setProfileMessage({ type: "success", text: "Profile updated successfully." });
+    } catch (error) {
+      console.error("Failed to save profile:", error);
+      setProfileMessage({ type: "error", text: "Failed to update profile. See console for details." });
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function handleSaveJira(e: React.FormEvent) {
     e.preventDefault();
@@ -84,31 +117,79 @@ export function SettingsClient() {
         <div className="rounded-xl border border-app-border bg-app-elevated p-6">
           <h2 className="mb-4 text-lg font-semibold text-app-text">User Profile</h2>
           
-          <div className="space-y-4">
-            <div>
-              <label className="mb-1 block text-sm font-medium text-app-muted">Name</label>
-              <div className="text-app-text">{profile?.displayName || "—"}</div>
-            </div>
-            
+          <form onSubmit={handleSaveProfile} className="space-y-4">
             <div>
               <label className="mb-1 block text-sm font-medium text-app-muted">Email</label>
               <div className="text-app-text">{user?.email || "—"}</div>
             </div>
 
-            <div>
-              <label className="mb-1 block text-sm font-medium text-app-muted">Team ID</label>
-              <div className="text-app-text font-mono text-app-accent">
-                {profile?.teamId || "No Team Assigned"}
+            <div className="flex gap-4">
+              <div className="flex-1">
+                <label className="mb-1 block text-sm font-medium text-app-muted">User ID Number</label>
+                <div className="text-app-text font-mono text-app-accent">
+                  #{profile?.userNumber || "—"}
+                </div>
+              </div>
+              <div className="flex-1">
+                <label className="mb-1 block text-sm font-medium text-app-muted">Points</label>
+                <div className="text-app-text font-mono text-app-accent">
+                  {profile?.points || 0}
+                </div>
               </div>
             </div>
 
             <div>
-              <label className="mb-1 block text-sm font-medium text-app-muted">Role</label>
-              <div className="inline-block rounded-full bg-app-accent/20 px-3 py-1 text-sm font-medium capitalize text-app-accent">
-                {profile?.role === "admin" ? "Team Lead (Admin)" : profile?.role || "Worker"}
-              </div>
+              <label className="mb-1 block text-sm font-medium text-app-muted">Name</label>
+              <input
+                type="text"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                className="w-full rounded-lg border border-app-border bg-app-bg px-3 py-2 text-sm text-app-text outline-none focus:border-app-accent"
+              />
             </div>
-          </div>
+
+            <div>
+              <label className="mb-1 block text-sm font-medium text-app-muted">Team ID</label>
+              <input
+                type="text"
+                value={teamId}
+                onChange={(e) => setTeamId(e.target.value)}
+                className="w-full rounded-lg border border-app-border bg-app-bg px-3 py-2 text-sm text-app-text outline-none focus:border-app-accent font-mono"
+              />
+            </div>
+
+            <div>
+              <label className="mb-1 block text-sm font-medium text-app-muted">Role</label>
+              <select
+                value={role}
+                onChange={(e) => setRole(e.target.value as "admin" | "worker")}
+                className="w-full rounded-lg border border-app-border bg-app-bg px-3 py-2 text-sm text-app-text outline-none focus:border-app-accent capitalize"
+              >
+                <option value="admin">Team Lead (Admin)</option>
+                <option value="worker">Worker</option>
+              </select>
+            </div>
+
+            <div className="pt-2">
+              <button
+                type="submit"
+                disabled={saving}
+                className="rounded-lg bg-app-accent px-4 py-2 text-sm font-medium text-white hover:bg-app-accent/90 disabled:opacity-50"
+              >
+                {saving ? "Saving..." : "Save profile"}
+              </button>
+            </div>
+
+            {profileMessage && (
+              <p
+                className={`text-sm ${
+                  profileMessage.type === "success" ? "text-green-500" : "text-red-500"
+                }`}
+              >
+                {profileMessage.text}
+              </p>
+            )}
+          </form>
         </div>
       )}
 
