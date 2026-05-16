@@ -26,13 +26,20 @@ import {
 import {
   doc,
   getDoc,
+  getDocs,
+  collection,
+  query,
+  where,
   onSnapshot,
   serverTimestamp,
   setDoc,
+  addDoc,
   Timestamp,
   type Unsubscribe,
 } from "firebase/firestore";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { USERS_COLLECTION, type UserProfileDoc } from "@/lib/user-model";
+import { type TaskStatus } from "@/lib/task-model";
 
 const TABS = [
   "overview",
@@ -74,6 +81,7 @@ export function SystemDesignerClient() {
   const [remoteNotice, setRemoteNotice] = useState(false);
   const [extraMarkdown, setExtraMarkdown] = useState<string | null>(null);
   const [extraTitle, setExtraTitle] = useState("");
+  const [publishingTasks, setPublishingTasks] = useState(false);
   const lastLocalSaveMs = useRef(0);
   const snapshotHydrated = useRef(false);
   const exportRef = useRef<HTMLDivElement>(null);
@@ -237,6 +245,121 @@ export function SystemDesignerClient() {
       setError(e instanceof Error ? e.message : "Request failed");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handlePublishTasks() {
+    if (!user || !blueprint || !profile?.teamId || blueprint.tasks.length === 0) return;
+    setPublishingTasks(true);
+    setError(null);
+
+    try {
+      // Fetch workers in the team
+      const teamId = profile.teamId;
+      const workersQuery = query(
+        collection(getFirestoreDb(), USERS_COLLECTION),
+        where("role", "==", "worker"),
+        where("teamId", "==", teamId)
+      );
+      const workersSnap = await getDocs(workersQuery);
+
+      const workers = workersSnap.docs.map(doc => ({
+        uid: doc.id,
+        ...doc.data() as UserProfileDoc
+      }));
+
+      // Sort workers by experience (points ascending) and tasks by difficulty (estimate_points descending)
+      const sortedWorkers = workers.sort((a, b) => (a.points || 0) - (b.points || 0));
+      const sortedTasks = [...blueprint.tasks].sort((a, b) => (b.estimate_points || 0) - (a.estimate_points || 0));
+
+      const workerAssignments = new Map<string, number>();
+
+      // Initialize assignment counts
+      sortedWorkers.forEach(w => workerAssignments.set(w.uid, 0));
+
+      const assignedTasks = sortedTasks.map((task) => {
+        let assignedUid: string | null = null;
+        if (sortedWorkers.length > 0) {
+          // Find worker with least tasks assigned so far in this batch to distribute evenly
+          const leastLoadedWorker = sortedWorkers.reduce((prev, curr) => {
+             const prevCount = workerAssignments.get(prev.uid) || 0;
+             const currCount = workerAssignments.get(curr.uid) || 0;
+             return prevCount <= currCount ? prev : curr;
+          });
+          assignedUid = leastLoadedWorker.uid;
+          workerAssignments.set(assignedUid, (workerAssignments.get(assignedUid) || 0) + 1);
+        }
+
+        return {
+          task,
+          assignedUid
+        };
+      });
+
+      // Format payload for Jira batch create
+      const jiraPayload = {
+        issues: assignedTasks.map(({ task }) => ({
+          summary: task.title,
+          description: task.description,
+          issue_type: "Task"
+        }))
+      };
+
+      let createdIssues: { issue_key: string }[] = [];
+
+      // Call Jira API if credentials exist
+      const h = buildJiraAuthHeaders(profile ?? null);
+      if (h) {
+        const res = await fetch(`${getPublicApiBaseUrl()}/jira/issues/batch`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...h },
+          body: JSON.stringify(jiraPayload),
+        });
+
+        if (res.ok) {
+          const result = await res.json();
+          createdIssues = result.created || [];
+        } else {
+          console.error("Failed to publish tasks to Jira", await res.text());
+        }
+      }
+
+      // Save to Firestore
+      const db = getFirestoreDb();
+      const tasksCol = collection(db, "projects", teamId, "tasks");
+      const now = serverTimestamp();
+
+      await Promise.all(assignedTasks.map(async ({ task, assignedUid }, index) => {
+        const jiraIssueKey = createdIssues[index]?.issue_key || null;
+
+        await addDoc(tasksCol, {
+          title: task.title,
+          description: task.description,
+          status: "todo" satisfies TaskStatus,
+          priority: "medium", // Default
+          publishedByUid: user.uid,
+          assigneeUid: assignedUid,
+          assigneeLabel: "",
+          createdAt: now,
+          updatedAt: now,
+          dueAt: null,
+          completedAt: null,
+          completedByUid: null,
+          timeEstimateMinutes: null,
+          timeSpentMinutes: null,
+          estimatePoints: task.estimate_points || null,
+          jiraIssueKey: jiraIssueKey
+        });
+      }));
+
+      setExtraTitle("Publish Tasks");
+      setExtraMarkdown(`Successfully published ${assignedTasks.length} tasks and assigned to your team.`);
+
+    } catch (err) {
+      console.error(err);
+      setError(err instanceof Error ? err.message : "Failed to publish tasks");
+    } finally {
+      setPublishingTasks(false);
     }
   }
 
@@ -576,6 +699,18 @@ export function SystemDesignerClient() {
 
             {tab === "tasks" ? (
               <div className="space-y-3">
+                {d.tasks.length > 0 && profile?.teamId && (
+                  <div className="mb-4 flex justify-end">
+                    <button
+                      type="button"
+                      disabled={publishingTasks}
+                      onClick={() => void handlePublishTasks()}
+                      className="rounded-lg bg-app-accent px-4 py-2 text-sm font-semibold text-white hover:bg-app-accent/90 disabled:opacity-50"
+                    >
+                      {publishingTasks ? "Publishing..." : "Publish Tasks & Assign Team"}
+                    </button>
+                  </div>
+                )}
                 {d.tasks.map((t, i) => (
                   <div
                     key={`${t.title}-${i}`}

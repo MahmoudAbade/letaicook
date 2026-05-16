@@ -10,6 +10,8 @@ export type UserProfileDoc = {
   emailLower: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;
+  userNumber?: number;
+  points?: number;
   // User-specific Jira credentials
   jiraDomain?: string;
   jiraEmail?: string;

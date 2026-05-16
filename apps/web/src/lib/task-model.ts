@@ -31,6 +31,7 @@ export type TaskDoc = {
   completedByUid: string | null;
   timeEstimateMinutes: number | null;
   timeSpentMinutes: number | null;
+  estimatePoints: number | null;
   jiraIssueKey: string | null;
 };
 

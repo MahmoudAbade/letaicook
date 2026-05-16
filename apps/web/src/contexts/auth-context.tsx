@@ -7,7 +7,7 @@ import {
   signOut,
   type User,
 } from "firebase/auth";
-import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import { doc, getDoc, serverTimestamp, setDoc, runTransaction } from "firebase/firestore";
 import {
   createContext,
   useCallback,
@@ -111,15 +111,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         password,
       );
       const uid = cred.user.uid;
-      const ref = doc(getFirestoreDb(), USERS_COLLECTION, uid);
+      const db = getFirestoreDb();
+      const counterRef = doc(db, "counters", "users");
+      const uidRef = doc(db, USERS_COLLECTION, uid);
+
+      let userNumber = 1;
+
+      try {
+        await runTransaction(db, async (transaction) => {
+          const counterDoc = await transaction.get(counterRef);
+          if (!counterDoc.exists()) {
+            transaction.set(counterRef, { lastId: 1 });
+          } else {
+            userNumber = (counterDoc.data().lastId || 0) + 1;
+            transaction.update(counterRef, { lastId: userNumber });
+          }
+        });
+      } catch (err) {
+        console.error("Failed to increment userNumber counter, proceeding without it", err);
+      }
+
       const now = serverTimestamp();
-      await setDoc(ref, {
+      await setDoc(uidRef, {
         displayName: displayName.trim() || email.trim(),
         role,
         teamId: teamId.trim(),
         emailLower: email.trim().toLowerCase(),
         createdAt: now,
         updatedAt: now,
+        userNumber,
+        points: 0,
       });
     },
     [],

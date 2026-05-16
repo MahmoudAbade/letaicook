@@ -22,7 +22,10 @@ import {
   Timestamp,
   updateDoc,
   where,
+  increment,
 } from "firebase/firestore";
+import { getPublicApiBaseUrl } from "@/lib/api-base";
+import { buildJiraAuthHeaders } from "@/lib/jira-client";
 
 function tasksCollection(teamId: string) {
   return collection(
@@ -188,7 +191,7 @@ export function TasksBoard() {
     setAssigneeUid("");
   }
 
-  async function patchTask(id: string, patch: Record<string, unknown>) {
+  async function patchTask(id: string, patch: Record<string, unknown>, jiraIssueKey?: string | null, workerUid?: string | null) {
     const teamId = profile?.teamId || DEMO_PROJECT_ID;
     const ref = doc(
       getFirestoreDb(),
@@ -197,10 +200,53 @@ export function TasksBoard() {
       "tasks",
       id,
     );
+
+    const oldTask = items.find((i) => i.id === id)?.data;
+    const oldStatus = oldTask?.status;
+    const newStatus = patch.status as TaskStatus | undefined;
+
     await updateDoc(ref, {
       ...patch,
       updatedAt: serverTimestamp(),
     });
+
+    // Handle Jira Sync if status changed and issue key exists
+    if (newStatus && newStatus !== oldStatus && jiraIssueKey) {
+       const h = buildJiraAuthHeaders(profile ?? null);
+       if (h) {
+         let transitionName = "";
+         switch (newStatus) {
+           case "todo": transitionName = "To Do"; break;
+           case "in_progress": transitionName = "In Progress"; break;
+           case "review": transitionName = "In Review"; break;
+           case "done": transitionName = "Done"; break;
+           case "blocked": transitionName = "Blocked"; break;
+         }
+
+         if (transitionName) {
+           try {
+             await fetch(`${getPublicApiBaseUrl()}/jira/issues/${jiraIssueKey}/transition`, {
+               method: "POST",
+               headers: { "Content-Type": "application/json", ...h },
+               body: JSON.stringify({ transition_name: transitionName }),
+             });
+           } catch (err) {
+             console.error("Failed to sync status to Jira", err);
+           }
+         }
+       }
+    }
+
+    // Give point if marked done
+    if (newStatus === "done" && oldStatus !== "done") {
+       const assignedWorker = workerUid || oldTask?.assigneeUid || user?.uid;
+       if (assignedWorker) {
+         const userRef = doc(getFirestoreDb(), USERS_COLLECTION, assignedWorker);
+         await updateDoc(userRef, {
+           points: increment(1)
+         }).catch(err => console.error("Failed to give point to worker", err));
+       }
+    }
   }
 
   async function removeTask(id: string) {
@@ -215,21 +261,21 @@ export function TasksBoard() {
     await deleteDoc(ref);
   }
 
-  async function markDone(id: string) {
+  async function markDone(id: string, jiraIssueKey: string | null) {
     if (!user) return;
     await patchTask(id, {
       status: "done",
       completedAt: serverTimestamp(),
       completedByUid: user.uid,
-    });
+    }, jiraIssueKey);
   }
 
-  async function reopenTask(id: string) {
+  async function reopenTask(id: string, jiraIssueKey: string | null) {
     await patchTask(id, {
       status: "todo",
       completedAt: null,
       completedByUid: null,
-    });
+    }, jiraIssueKey);
   }
 
   if (authLoading) {
@@ -400,7 +446,7 @@ export function TasksBoard() {
                   {!isAdmin && data.status !== "done" ? (
                     <button
                       type="button"
-                      onClick={() => markDone(id)}
+                      onClick={() => markDone(id, data.jiraIssueKey)}
                       className="rounded-lg bg-app-accent px-3 py-1.5 text-sm font-medium text-app-on-accent hover:bg-app-accent-bright"
                     >
                       Mark done
@@ -409,7 +455,7 @@ export function TasksBoard() {
                   {isAdmin && data.status === "done" ? (
                     <button
                       type="button"
-                      onClick={() => reopenTask(id)}
+                      onClick={() => reopenTask(id, data.jiraIssueKey)}
                       className="text-sm text-app-muted underline hover:text-app-accent"
                     >
                       Reopen
@@ -435,7 +481,7 @@ export function TasksBoard() {
                     className="rounded-lg border border-app-border bg-app-bg px-2 py-1.5 text-sm text-app-text disabled:opacity-60"
                     value={data.status}
                     onChange={(e) =>
-                      patchTask(id, { status: e.target.value as TaskStatus })
+                      patchTask(id, { status: e.target.value as TaskStatus }, data.jiraIssueKey)
                     }
                   >
                     {STATUSES.map((s) => (
